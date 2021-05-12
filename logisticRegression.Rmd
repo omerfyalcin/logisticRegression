@@ -1,0 +1,200 @@
+---
+title: 'Logistic Regression: Diabetes Dataset'
+output:  html_notebook
+---
+
+Load some necessary packages.
+```{r, message=FALSE}
+library(ggplot2)
+library(magrittr)
+library(dplyr)
+library(readr)
+library(tibble)
+```
+
+Load the data from csv file. 
+```{r}
+pima <- read_csv("pima.csv")
+pima %>% glimpse()
+```
+
+Split the data into a training and test set, so that predictive performance is not biased by overfitting the data:
+```{r}
+set.seed(0)
+trainIndex <- sample(1:nrow(pima), size = round(0.8*nrow(pima)))
+pimaTrain <- pima[trainIndex,]
+pimaTest <- pima[-trainIndex,]
+cat(nrow(pimaTrain), " observations are in the training set. \n")
+cat(nrow(pimaTest), " observations are in the test set.")
+```
+
+Train a model with the built-in glm() function: 
+--> two explanatory variables / features: plasma glucose concentration & body mass index
+--> "family" tells the function that the outcome variable is dichotomous 
+```{r}
+m1 <- glm( diabetes ~ glucose + mass, data = pimaTrain, family = binomial)
+summary(m1)
+```
+# Interpretation (1): Odds Ratio
+
+When we exponentiate a coefficient, we get the odds ratio:
+
+```{r}
+m1 %>%
+  use_series("coefficients") %>%
+  extract(2) %>%
+  exp() %>%
+  cat("Odds Ratio (glucose = a + 1) / (glucose = a) :", .)
+```
+```{r}
+m1 %>%
+  use_series("coefficients") %>%
+  extract(3) %>%
+  exp() %>%
+  cat("Odds Ratio (mass = a + 1) / (mass = a) :", .) 
+```
+# Interpretation (2): Predicted Probabilities
+
+The predict() function allows us to make predictions with the trained model.
+Let's make a prediction for someone who has **median values** for both features.
+```{r}
+pima %>%
+  summarize(glucose = median(glucose),
+            mass = median(mass)) %>%
+  predict(m1, newdata = .) -> pred_median
+
+cat("Log-odds:", pred_median)
+```
+
+However, this outcome is expressed as log-odds. 
+We can use the plogis() function to transform this into  probability.
+plogis() is the sigmoid / logistic function in slides.
+```{r}
+pred_median %>%
+  plogis() %>%
+  cat("Probability of being diabetes positive:", .)
+```
+Taking the log-odds again (logit) would give the initial number.
+qlogis() is the built-in logit() function.
+```{r}
+pred_median %>%
+  plogis() %>% # sigmoid
+  qlogis() %>% # logit
+  cat("sigmoid, logit, back to log-odds:", .)
+```
+
+Luckily, the predict function can also produce the probability directly.
+What is the probability that someone with **median values** for all three features will be diabetes positive?
+```{r}
+pima %>%
+  summarize(glucose = median(glucose),
+            mass = median(mass)) %>%
+  predict(m1, newdata = ., type = "response") %>%
+  multiply_by(100) %>%
+  round() %>%
+  paste0("%") %>%
+  cat("Probability of being diabetes positive: ", .)
+```
+What would the probability be if blood glucose concentration was two standard deviations above median?
+```{r}
+pima %>%
+  summarize(glucose = median(glucose) + 2*sd(glucose),
+            mass = median(mass)) %>%
+  predict(m1, newdata = ., type = "response") %>%
+  multiply_by(100) %>%
+  round() %>%
+  paste0("%") %>%
+  cat("Probability: ", .)
+```
+# Visualization
+
+```{r}
+xrange <- seq(min(pimaTrain$glucose), max(pimaTrain$glucose), 0.01)
+
+predict(m1,
+        newdata = data.frame(glucose =  xrange,
+                             mass = median(pimaTrain$mass)),
+        se.fit = TRUE) %>%
+  as.data.frame() %>%
+  mutate(lwr = plogis(fit + qnorm(0.025) * se.fit),
+         upr = plogis(fit + qnorm(0.975) * se.fit),
+         prob = plogis(fit)) %>%
+  add_column(xrange = xrange) %>%
+  select(c("lwr", "upr", "prob", "xrange")) %>%
+  ggplot(aes(x = xrange, y = prob)) +
+  geom_line(color = "blue", size = 1) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr), alpha = 0.2) +
+  geom_point(
+    data = pimaTrain,
+    aes(x = glucose, y = diabetes),
+    alpha = 0.07,
+    size = 10
+  ) +
+  labs(
+    x = "Plasma Glucose Concentration [BMI fixed at median]",
+    y = "Diabetes Positive" 
+  ) +
+  theme_bw()
+
+```
+
+
+
+# Classification
+In the world of machine learning, the focus is classification.
+Take probabilities, use them for assigning the labels 1 or 0.
+Apply the predictions to the entire test set.
+Use 0.5 as threshold for classification.
+
+```{r}
+pimaTest$predProb <- predict(m1, newdata = pimaTest, type = "response")
+pimaTest$predClass <- ifelse(pimaTest$predProb > 0.5, 1, 0)
+pimaTest %>% glimpse()
+```
+
+Create confusion matrix.
+```{r}
+cm <- table(pimaTest$predClass, pimaTest$diabetes) # first arg in rows, second arg in columns.
+print(cm)
+```
+
+Calculate precision, recall, and F-score, accuracy.
+
+```{r}
+tp <- cm[2,2]
+tn <- cm[1,1]
+fp <- cm[2,1] # Type I error
+fn <- cm[1,2] # Type II error
+
+precision <- tp / (tp + fp)
+recall <- tp / (tp + fn)
+f_score <- 2 * ((precision * recall ) / (precision + recall)) # harmonic mean of precision and recall
+accuracy <- (tp + tn) / (tp + tn + fp + fn)
+
+cat(
+  paste("\n"),
+  paste("Precision:", round(precision, 2) , sep = "\t"), paste("\n"),
+  paste("Recall:", round(recall, 2), sep = "\t"),paste("\n"),
+  paste("F-score", round(f_score, 2), sep = "\t"), paste("\n"),
+  paste("Accuracy:", round(accuracy, 2), sep = "\t")
+)
+
+```
+
+# Visualization
+
+```{r}
+int <- -coef(m1)[1]/coef(m1)[3]
+slope <- -coef(m1)[2]/coef(m1)[3]
+
+ggplot(pimaTrain, aes(x = glucose, y = mass)) + 
+  geom_point(aes(color = factor(diabetes)), size = 2) + 
+  geom_abline(intercept = int, slope = slope) +
+  labs(
+    x = "Plasma Glucose Concentration",
+    y= "Body Mass Index",
+    color = "Diabetes"
+  ) + 
+  theme_bw()
+```
+
